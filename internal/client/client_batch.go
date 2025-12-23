@@ -434,6 +434,17 @@ func (s *batchCommandsStream) recv() (resp *tikvpb.BatchCommandsResponse, err er
 	}
 	// When `conn.Close()` is called, `client.Recv()` will return an error.
 	resp, err = s.Recv()
+	if err == nil && resp != nil {
+		// Log the response size for debugging memory issues
+		respSize := resp.Size()
+		if respSize > 1024*1024 { // Log if response > 1MB
+			logutil.BgLogger().Info("[DEBUG-GRPC-MEM] batchCommandsStream received large response",
+				zap.Int("respSize", respSize),
+				zap.Int("numResponses", len(resp.GetResponses())),
+				zap.Int("numRequestIds", len(resp.GetRequestIds())),
+				zap.String("forwardedHost", s.forwardedHost))
+		}
+	}
 	return
 }
 
@@ -661,6 +672,11 @@ func (c *batchCommandsClient) batchRecvLoop(cfg config.TiKVClient, tikvTransport
 		}
 	}()
 
+	// Debug: track cumulative response sizes
+	var totalRespSize int64
+	var totalRespCount int64
+	var lastLogTime = time.Now()
+
 	epoch := atomic.LoadUint64(&c.epoch)
 	for {
 		recvLoopStartTime := time.Now()
@@ -671,6 +687,27 @@ func (c *batchCommandsClient) batchRecvLoop(cfg config.TiKVClient, tikvTransport
 		if recvDur > batchRecvTailLatThreshold {
 			c.metrics.batchRecvTailLat.Observe(recvDur.Seconds())
 		}
+
+		// Debug: accumulate and log stats every 30 seconds
+		if resp != nil {
+			respSize := int64(resp.Size())
+			totalRespSize += respSize
+			totalRespCount++
+			if time.Since(lastLogTime) > 30*time.Second {
+				avgRespSizeKB := int64(0)
+				if totalRespCount > 0 {
+					avgRespSizeKB = totalRespSize / 1024 / totalRespCount
+				}
+				logutil.BgLogger().Info("[DEBUG-GRPC-MEM] batchRecvLoop stats",
+					zap.String("target", c.target),
+					zap.Int64("totalRespSizeMB", totalRespSize/(1024*1024)),
+					zap.Int64("totalRespCount", totalRespCount),
+					zap.Int64("avgRespSizeKB", avgRespSizeKB),
+					zap.String("forwardedHost", streamClient.forwardedHost))
+				lastLogTime = time.Now()
+			}
+		}
+
 		if err != nil {
 			if c.isStopped() {
 				return
@@ -702,6 +739,23 @@ func (c *batchCommandsClient) batchRecvLoop(cfg config.TiKVClient, tikvTransport
 		}
 
 		responses := resp.GetResponses()
+		// Log individual response sizes for debugging memory issues
+		for i, singleResp := range responses {
+			if singleResp != nil {
+				singleRespSize := singleResp.Size()
+				if singleRespSize > 512*1024 { // Log if single response > 512KB
+					cmdType := "unknown"
+					if cmd := singleResp.GetCmd(); cmd != nil {
+						cmdType = fmt.Sprintf("%T", cmd)
+					}
+					logutil.BgLogger().Info("[DEBUG-GRPC-MEM] large single response in batch",
+						zap.Int("index", i),
+						zap.Int("singleRespSize", singleRespSize),
+						zap.String("cmdType", cmdType),
+						zap.String("target", c.target))
+				}
+			}
+		}
 		for i, requestID := range resp.GetRequestIds() {
 			value, ok := c.batched.Load(requestID)
 			if !ok {
