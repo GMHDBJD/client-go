@@ -45,8 +45,8 @@ import (
 const (
 	// DefStoreLivenessTimeout is the default value for store liveness timeout.
 	DefStoreLivenessTimeout       = "1s"
-	DefGrpcInitialWindowSize      = 1 << 27 // 128MiB
-	DefGrpcInitialConnWindowSize  = 1 << 27 // 128MiB
+	DefGrpcInitialWindowSize      = 1 << 25 // 32MiB
+	DefGrpcInitialConnWindowSize  = 1 << 25 // 32MiB
 	DefMaxConcurrencyRequestLimit = math.MaxInt64
 	DefBatchPolicy                = BatchPolicyStandard
 )
